@@ -160,8 +160,7 @@ class Notification(models.Model):
     LEVELS = Choices('success', 'info', 'warning', 'error')
     level = models.CharField(choices=LEVELS, default=LEVELS.info, max_length=20)
 
-    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, blank=False, related_name='notifications')
-    unread = models.BooleanField(default=True, blank=False)
+    recipients = models.ManyToManyField(settings.AUTH_USER_MODEL, through='NotifyUser')
 
     actor_content_type = models.ForeignKey(ContentType, related_name='notify_actor')
     actor_object_id = models.CharField(max_length=255)
@@ -186,11 +185,8 @@ class Notification(models.Model):
     timestamp = models.DateTimeField(default=now)
 
     public = models.BooleanField(default=True)
-    deleted = models.BooleanField(default=False)
-    emailed = models.BooleanField(default=False)
 
     data = JSONField(blank=True, null=True)
-    objects = managers.PassThroughManager.for_queryset_class(NotificationQuerySet)()
 
     class Meta:
         ordering = ('-timestamp', )
@@ -227,6 +223,22 @@ class Notification(models.Model):
     def slug(self):
         return id2slug(self.id)
 
+class NotifyUser(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='notifications')
+    notification = models.ForeignKey(Notification)
+    unread = models.BooleanField(default=True, blank=False)
+
+    deleted = models.BooleanField(default=False)
+    emailed = models.BooleanField(default=False)
+
+    objects = managers.PassThroughManager.for_queryset_class(NotificationQuerySet)()
+
+    class Meta:
+        app_label = 'notifications'
+
+    class Meta:
+        unique_together = (("user", "notification"), )
+
     def mark_as_read(self):
         if self.unread:
             self.unread = False
@@ -250,14 +262,22 @@ def notify_handler(verb, **kwargs):
     """
 
     kwargs.pop('signal', None)
-    recipient = kwargs.pop('recipient')
+    recipient = kwargs.pop('recipient', None)
+
+    if recipient:
+        recipients = [recipient]
+    else:
+        recipients = kwargs.pop('recipients', None)
+        if not recipients:
+            from django.contrib.auth import get_user_model
+            recipients = get_user_model().objects.all()
+
     actor = kwargs.pop('sender')
     newnotify = Notification(
-        recipient = recipient,
         actor_content_type=ContentType.objects.get_for_model(actor),
         actor_object_id=actor.pk,
         verb=text_type(verb),
-        public=bool(kwargs.pop('public', True)),
+        public=bool(kwargs.pop('public', False)),
         description=kwargs.pop('description', None),
         timestamp=kwargs.pop('timestamp', now()),
         level=kwargs.pop('level', Notification.LEVELS.info),
@@ -275,6 +295,7 @@ def notify_handler(verb, **kwargs):
 
     newnotify.save()
 
+    [NotifyUser.objects.create(user=recipient, notification=newnotify) for recipient in recipients]
 
 # connect the signal
 notify.connect(notify_handler, dispatch_uid='notifications.models.notification')
